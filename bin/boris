@@ -1,0 +1,579 @@
+#! /usr/bin/env python
+
+"""
+Build Or Run Incremental Simulations (boris)
+
+Questa 3 stage build program. Reads a configuration file to determine
+how the build is to be done. All commands are run via "memoize", which
+only runs commands that need to be rerun.
+"""
+
+import re
+import os
+import sys
+import optparse
+import copy
+import memoize
+
+DEPS_FILE=".deps-"
+VLOG = "vlog -suppress 2286"
+VLIB = "vlib"
+VSIM = "vsim"
+VIEW = "vsim"
+QCMD = 'qrsh -l "msimhdlsim=1,svverification=1"'
+VOPT = "vopt -quiet"
+DEFAULT_CONFIG = "build.cfg"
+FAILBACK_CONFIG = os.path.join("..", "questa", DEFAULT_CONFIG)
+
+vopt_required = 0
+
+#-----------------------------------------------------------------------
+#
+# Regular expressions for parsing the command file
+#
+#-----------------------------------------------------------------------
+file_re    = re.compile("(.*\.(v|sv|vh|svh)$)")
+incdir_re  = re.compile("\+incdir\+(\S+)")
+define_re  = re.compile("(\+define\+\S+)")
+
+
+def find_exe(path, program):
+    """
+    Finds the full path to the specified file, given a 
+    search path.
+    """
+    if program[0] == "/":
+        return program
+    else:
+        for i in path.split(":"):
+            cmd = os.path.join(i, program)
+            if os.path.exists(cmd):
+                return os.path.abspath(cmd)
+    return program
+
+class BuildParser:
+    """
+    BuildParser class. Parses the config file and builds the commands
+    that need to be run. 
+
+    Currently, the following commands are recognized:
+
+       +define+TOKEN
+       +define+TOKEN=VALUE
+       +incdir+<path>
+       compilation_file.sv
+
+    Files listed are added to the compile list. All paths should be relative
+    to where the config file exists. The parser will convert these paths
+    to valid paths for the current working directory. An example file would
+    be:
+
+       # Just a comment
+       +incdir+.
+       my_module.sv
+
+       @if fpga
+         +define+USE_FPGA
+       @endif
+
+    """
+    def __init__(self, name, case, deflist=[], inclist=[], vlog_list=[], vopt_list=[], added_vars={}):
+        self.case = case
+        self.file_list = []
+        self.preprocess_active = False
+        
+        self.include_list = inclist[:]
+        self.define_list = deflist[:]
+        self.vlog_list = vlog_list[:]
+        self.vopt_list = vopt_list[:]
+        self.modules = []
+        self.boris_def_list = set()
+        self.added_vars = added_vars
+        self.active_met = False
+        
+        # to handle new keywords, add the keyword to the list, and provide
+        # a function to handle the keyword. The preprocess flag should be
+        # False.
+        self.keywords = {
+            # keyword               (handler                , preprocess flag)
+            # -------               ----------------------------------------
+            '@import'               : (self._handle_import,   False),
+            '+cover'                : (self._handle_vlog_cmd, False),
+            '-timescale'            : (self._handle_vlog_cmd, False),
+            '-lint'                 : (self._handle_vlog_cmd, False),
+            '-quiet'                : (self._handle_vlog_cmd, False),
+            '-suppress'             : (self._handle_vlog_cmd, False),
+            '-sv'                   : (self._handle_vlog_cmd, False),
+            '-sv_lib'               : (self._handle_vsim_cmd, False),
+            '-pli'                  : (self._handle_vsim_cmd, False),
+            '-solvefaildebug'       : (self._handle_vsim_cmd, False),
+            '-nowarn'               : (self._handle_vlog_cmd, False),
+            '+nowarn2286'           : (self._handle_vlog_cmd, False),
+            '+notimingchecks'       : (self._handle_vopt_cmd, False),
+            '+acc'                  : (self._handle_vopt_cmd, False),
+            '+debugdb'              : (self._handle_vopt_cmd, False),
+            '-voptargs=+nosparse'   : (self._handle_vopt_cmd, False),
+            '+notimingchecks'       : (self._handle_vopt_cmd, False),
+            '-L'                    : (self._handle_vopt_cmd, False),
+            '@vopt'                 : (self._add_vopt_cmd,    False),
+            '@vlog'                 : (self._add_vlog_cmd,    False),
+            '@vsim'                 : (self._add_vsim_cmd,    False),
+            '@export'               : (self._handle_export,   False),
+            '@setenv'               : (self._handle_setenv,   False),
+            '@if'                   : (self._handle_if,       True),
+            '@elif'                 : (self._handle_elif,     True),
+            '@define'               : (self._handle_define,   False),
+            '@else'                 : (self._handle_else,     True),
+            '@endif'                : (self._handle_endif,    True),
+            }
+            
+        self.name = name
+        self.path = os.path.dirname(os.path.abspath(name))
+        self.sub_commands = []
+        self.vsim_cmds = []
+        self.enable = True
+        self.case_matches = 0
+        self.export_vopt_list = []
+        self.export_vsim_list = []
+
+    def add_defines(self, item_list):
+        if item_list:
+            for item in item_list:
+                self.boris_def_list.add("@" + item)
+
+    def _handle_if(self, cmd, text):
+        """
+        if is a preprocessor command that matches the current case to the
+        argument in the if statement. If the match, then we enable continued
+        parsing. If not, parsing is disabled (until the next else or endif)
+        """
+        self.preprocess_active = True
+        self.enable = (text == self.case) or (text in self.boris_def_list)
+        self.active_met = self.enable
+        if self.case == text:
+            self.case_matches += 1
+
+    def _handle_elif(self, cmd, text):
+        """
+        if is a preprocessor command that matches the current case to the
+        argument in the if statement. If the match, then we enable continued
+        parsing. If not, parsing is disabled (until the next else or endif)
+        """
+        self.preprocess_active = True
+        self.enable = (((text == self.case) or (text in self.boris_def_list))
+                       and not self.active_met)
+        self.active_met |= self.enable
+        if self.case == text:
+            self.case_matches += 1
+
+    def _handle_define(self, cmd, text):
+        """
+        if is a preprocessor command that matches the current case to the
+        argument in the if statement. If the match, then we enable continued
+        parsing. If not, parsing is disabled (until the next else or endif)
+        """
+        self.boris_def_list.add("@" + text)
+
+    def _handle_else(self, cmd, text):
+        """
+        When the else is encountered, the parsing enable flag is toggled.
+        """
+        if self.preprocess_active == False:
+            sys.stderr.write("'else' encountered without an 'if'")
+            sys.exit(1)
+        self.enable = not self.active_met
+        self.active_met = False
+
+    def _handle_endif(self, cmd, text):
+        self.preprocess_active = False
+        self.enable = True
+
+    def _handle_import(self, cmd, text):
+        new_file = self._fix_path(text)
+        p = BuildParser(new_file, self.case, self.define_list,
+                        self.include_list, self.vlog_list, self.vopt_list,
+                        self.added_vars)
+        p.read_config_file()
+        self.sub_commands += p.get_command_list()
+        self.case_matches += p.case_matches
+        self.export_vopt_list += p.export_vopt_list
+        self.export_vsim_list += p.export_vsim_list
+
+    def _handle_setenv(self, cmd, text):
+        data = text.split()
+        os.environ[data[0]] = data[1]
+        self.added_vars[data[0]] = data[1]
+
+    def _handle_export(self, cmd, text):
+        if (self.keywords.get(text.split()[0], (self._handle_vopt_cmd, False))[0] ==
+            self._handle_vopt_cmd):
+            self.export_vopt_list.append(text)
+        else:
+            self.export_vsim_list.append(text)
+
+    def _add_vlog_cmd(self, cmd, text):
+        for i in text.split():
+            if i not in self.vlog_list:
+                self.vlog_list.append(i)
+
+    def _add_vopt_cmd(self, cmd, text):
+        for i in text.split():
+            self.vopt_list.append(i)
+
+    def _add_vsim_cmd(self, cmd, text):
+        for i in text.split():
+            self.vsim_cmds.append(i)
+
+    def _handle_vlog_cmd(self, cmd, text):
+        txt = "%s %s" % (cmd, text)
+        if txt not in self.vlog_list:
+            self.vlog_list.append(txt)
+
+    def _handle_vopt_cmd(self, cmd, text):
+        self.vopt_list.append("%s %s" % (cmd, text))
+
+    def _handle_vsim_cmd(self, cmd, text):
+        self.vsim_cmds.append("%s %s" % (cmd, text))
+
+    def _extract_path(self, target_list, expr, line):
+        """
+        Extracts the path from the line based on the regular expression,
+        and converts the path relative to the current directory, and adds
+        it to the target list, assuming that we have a match.
+        """
+        match = expr.match(line)
+        if match:
+            target_list.append(self._fix_path(match.groups()[0]))
+            return True
+        return False
+
+    def _extract_item(self, target_list, expr, line):
+        match = expr.match(line)
+        if match:
+            target_list.append(match.groups()[0])
+            return True
+        return False
+
+    def _fix_path(self, item):
+        """
+        Converts a path relative to the configuration file to a path
+        relative to the current working directory.
+        """
+        return os.path.abspath(os.path.join(self.path, item))
+
+    def read_config_file(self):
+        """
+        Opens and reads the configuration file.
+        """
+        try:
+            for line in file(self.name):
+                line = os.path.expandvars(line.split("#")[0]).strip()
+                
+                if not line:
+                    continue
+
+                # handle the command set, with the exception of files,
+                # include paths, and defines, which have to be treated
+                # separately
+                
+                text = line.split(None, 1) + ['']
+                match = self.keywords.get(text[0])
+                if match:
+                    (func, preprocess) = match
+                    if self.enable or preprocess:
+                        func(text[0], text[1])
+                        continue
+
+                if not self.enable:
+                    continue
+
+                if self._extract_path(self.include_list, incdir_re, line):
+                    continue
+                
+                if self._extract_item(self.define_list, define_re, line):
+                    continue
+                
+                if self._extract_path(self.file_list, file_re, line):
+                    continue
+
+                if line and line[0] not in ("-", "+"):
+                    for item in line.split():
+                        self.modules.append(item)
+                    continue
+                
+                # anything not matching is assumed to be a vsim command
+                self.vsim_cmds.append(line)
+                
+        except IOError, msg:
+            sys.stderr.write(str(msg) + "\n");
+            sys.exit(1)
+
+    def _build_list(self, cases, item_list):
+        local_list = []
+        for item in cases:
+            local_list.append(item)
+        return local_list
+
+    def get_command_list(self):
+
+        include_list = [ "+incdir+%s" % i for i in self.include_list]
+
+        cmd_list = []
+        for item in self.file_list:
+            cmd = [VLOG] + ["-work %s" % self.case] + self.vlog_list + self.define_list + include_list + [item]
+            cmd_list.append((" ".join(cmd), item))
+        return self.sub_commands + cmd_list
+
+def run_memoize(cmd, case, display):
+    default_depsname = DEPS_FILE + case
+    default_deps = memoize.read_deps(default_depsname)
+    return memoize.memoize_with_deps(default_depsname, default_deps, cmd, display)
+
+def parse_command_line():
+    opt = optparse.OptionParser(usage="usage: %prog [options] UVM_TESTNAME")
+    opt.add_option("-n", "--dry-run", action="store_true", dest="dry_run",
+                   help="Display commands only, do not execute")
+    opt.add_option("-q", "--queue", action="store_true", dest="queue",
+                   help="Submit the job to the queues")
+    opt.add_option("-2", "--two-stage", action="store_true", dest="two_stage",
+                   help="Force the simulation to operate as a two stage build process")
+    opt.add_option("-w", "--view", action="store_true", dest="view",
+                   help="WLF file to use")
+    opt.add_option("-f", "--force", action="store_true", dest="force_rebuild",
+                   help="Forces a complete rebuild")
+    opt.add_option("-c", "--case", type="string", action="store", dest="case",
+                   default="work", help="Configuration to use")
+    opt.add_option("-v", "--verbose", action="store_true", dest="verbose",
+                   help="Produce verbose information on compilation")
+    opt.add_option("-d", "--define", action="append", dest="defines",
+                   help="Define a token for config file processing")
+    opt.add_option("-s", "--write-script", action="store", dest="script",
+                   help="Write the full set of commands to the script")
+    opt.add_option("", "--config", type="string", action="store",
+                   dest="cfg_file", default=DEFAULT_CONFIG,
+                   help="Configuration file to use")
+    opt.add_option("", "--gui", action="store_true", dest="gui",
+                   help='Short cut for "--define GUI"')
+    opt.add_option("", "--regress", action="store_true", dest="regress",
+                   help='Short cut for "--define REGRESS"')
+    opt.add_option("", "--seed", action="store", dest="seed",
+                   help='Defines the SystemVerilog seed')
+    opt.add_option("", "--defparam", action="append", dest="override",
+                   help='Override a Verilog parameter (parameter=value)')
+    opt.add_option("", "--no-respawn", dest="respawn", default=False,
+                   action="store_true", help=optparse.SUPPRESS_HELP)
+    
+    (options, args) = opt.parse_args()
+
+    if len(args) == 0:
+        opt.print_usage()
+        sys.exit(1)
+
+    return (options, args)
+
+
+def init_if_needed(options, s):
+    deps_file = DEPS_FILE + options.case
+
+    if options.force_rebuild:
+        if os.path.isfile(deps_file):
+            os.unlink(deps_file)
+
+    if not os.path.isdir(options.case):
+        os.system(VLIB + " " + options.case)
+        if os.path.isfile(deps_file):
+            os.unlink(deps_file)
+
+    if s:
+        s.write("if [ ! -f %s ]; then\n" % options.case)
+        s.write("  vlib %s\n" % options.case)
+        s.write("fi\n\n")
+
+def find_config_file(options):
+    if not os.path.isfile(options.cfg_file):
+        cfgfile = FAILBACK_CONFIG
+        if not os.path.isfile(cfgfile):
+            sys.stderr.write("Could not find configuration file (%s or %s)\n" % (options.cfg_file, cfgfile))
+            sys.exit(1)
+    else:
+        cfgfile = options.cfg_file
+    return cfgfile
+
+def three_stage_vopt(parser, options, s):
+    full_command = VOPT + " -work %s -o %s_opt " % (options.case, options.case) + \
+                   " ".join(parser.vopt_list + parser.modules + parser.export_vopt_list)
+
+    if s:
+        s.write("\necho Optimizing...\n")
+        s.write(full_command + "\n")
+    elif options.dry_run:
+        print full_command
+    else:
+        if options.verbose:
+            display_cmd = full_command
+        else:
+            display_cmd = "Optimizing..."
+
+        if display_cmd:
+            print display_cmd
+        status = os.system(full_command)
+        
+        if status != 0:
+            sys.exit(1)
+
+def three_stage_vsim(parser, options, plusargs, cmdargs, s):
+
+    link_cmds_list = parser.vsim_cmds
+
+    sim_cmd = find_exe(os.environ['PATH'], VSIM) + " -lib %s " % options.case +  " ".join(link_cmds_list) + " " + \
+              " ".join(plusargs) + " +UVM_TESTNAME=%s" % cmdargs[0] + " %s_opt" % options.case + " " + \
+              " ".join(parser.export_vsim_list)
+    
+    if s:
+        s.write("\n\necho Simulating %s...\n" % cmdargs[0])
+        s.write(sim_cmd + "\n")
+    else:
+        if options.verbose or options.dry_run:
+            print sim_cmd
+        else:
+            print "Simulating %s..." % cmdargs[0]
+
+        use_queue = not os.environ.get('SGE_STDIN_PATH') and \
+                    ((os.environ.get("SSH_TTY") and not options.respawn or 
+                     options.queue))
+        
+        if not options.dry_run:
+            if use_queue:
+                sim_cmd = "%s -N %s -verbose -cwd '%s'" % (QCMD, cmdargs[0], sim_cmd)
+            os.system(sim_cmd)
+
+def two_stage_vsim(parser, options, plusargs, cmdargs, s):
+
+    link_cmds_list = parser.vsim_cmds + parser.export_vopt_list + parser.export_vsim_list
+    sim_cmd = VSIM + " -lib %s " % options.case +  \
+              " ".join(link_cmds_list) + " " + \
+              " ".join(plusargs) + " +UVM_TESTNAME=%s" % cmdargs[0] +  \
+              " " + " ".join(parser.vopt_list) + \
+              " " + " ".join(parser.modules)
+    
+    if s:
+        s.write("\n\necho Simulation %s...\n" % cmdargs[0])
+        s.write(sim_cmd + "\n")
+    else:
+        if options.verbose:
+            print sim_cmd
+        else:
+            print "Simulating %s..." % cmdargs[0]
+
+        if not options.dry_run:
+            if os.environ.get("SSH_TTY") or (options.queue and not os.environ.get('SGE_STDIN_PATH')):
+                sim_cmd = "%s -N %s -verbose -cwd '%s'" % (QCMD, cmdargs[0], sim_cmd)
+            os.system(sim_cmd)
+
+def run_vlog(full_command, name, options, s):
+    if options.dry_run:
+        print full_command
+        return 1
+    elif s:
+        s.write("\necho Compiling %s\n" % os.path.basename(name))
+        s.write(full_command)
+        return 1
+    else:
+        if options.verbose:
+            display_cmd = None
+        else:
+            display_cmd = "Compiling %s..." % os.path.basename(name)
+                
+        status = run_memoize(full_command, options.case, display=display_cmd)
+        
+        if status[0] != 0:
+            sys.exit(1)
+        return status[1]
+
+def run_view(cmdargs, options):
+
+    wlffile = '%s.%s.wlf' % (cmdargs[0], options.case)
+
+    if os.path.isfile(wlffile) == False:
+        sys.stderr.write("ERROR: WLF file '%s' does not exist\n" % wlffile)
+    else:
+        cmd = '%s -view %s ' % (VIEW, wlffile)
+    
+        if os.path.isfile("%s.%s.dbg " % (cmdargs[0], options.case)):
+            cmd = cmd + '-debugdb %s.%s.dbg ' % (cmdargs[0], options.case)
+        if os.path.isfile("%s.do" % cmdargs[0]):
+            cmd = cmd + '-do %s.do ' % cmdargs[0]
+        elif os.path.isfile("wave.do"):
+            cmd = cmd + '-do wave.do '
+        os.system(cmd)
+    
+def main():
+    s = None
+    (options, args) = parse_command_line()
+
+    plusargs = [ item for item in args if item.lower().startswith("+") ]
+    cmdargs = [ item for item in args if not item.lower().startswith("+uvm") ]
+    
+    os.environ["UVM_TESTNAME"] = cmdargs[0]
+    os.environ["BORIS_CASE"] = options.case
+    
+    memoize.add_relevant_dir(
+        os.path.join(os.path.abspath(os.curdir), options.case))
+
+    cfgfile = find_config_file(options)
+
+    parser = BuildParser(cfgfile, options.case)
+    parser.add_defines(options.defines)
+    if options.gui:
+        parser.add_defines(["GUI"])
+    if options.regress:
+        parser.add_defines(["REGRESS"])
+
+    if options.override:
+        parser.vlog_list.append("+floatparameters")
+        
+    parser.read_config_file()
+
+    if options.case != "work" and parser.case_matches == 0:
+        sys.stderr.write('The case "%s" matched no conditionals. Command line error?\n' % options.case)
+        sys.exit(1)
+
+    if options.script:
+        s = open(options.script, "w")
+        s.write("#! /bin/sh\n")
+        for key in parser.added_vars.keys():
+            s.write('export %s="%s"\n' % (key, parser.added_vars[key]))
+
+    init_if_needed(options, s)
+    memoize.set_verbose(options.verbose)
+
+    # VLOG
+    need_vopt = False
+
+    if options.override:
+        need_vopt = True
+        parser.vlog_list.append("+floatparameters")
+        parser.vopt_list.append("-G %s" % options.override)
+
+    for (full_command, name) in parser.get_command_list():
+        need_vopt |= run_vlog(full_command, name, options, s)
+
+    if options.seed:
+        plusargs.append("-sv_seed")
+        plusargs.append(options.seed)
+
+    # VOPT/VSIM
+    if options.two_stage:
+        two_stage_vsim(parser, options, plusargs, cmdargs, s)
+    elif options.view:
+        run_view(cmdargs, options)
+    else:
+        if need_vopt:
+            three_stage_vopt(parser, options, s)
+        three_stage_vsim(parser, options, plusargs, cmdargs, s)
+
+    if s:
+        s.close()
+
+if __name__ == "__main__":
+    main()
