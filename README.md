@@ -1,10 +1,8 @@
-boris
-=====
+# boris #
+ 
+Python script to manage Questa/Modelsim based UVM/OVM simulations 
 
-Python script to manage Questa/Modelsim based UVM/OVM simulations
-
-Introduction
-------------
+## Introduction ##
 
 ``boris`` is a script for managing a Mentor Graphics Questa (Modelsim)
 simulation. Compling and running a modern Verilog or SystemVerilog
@@ -42,7 +40,7 @@ be recompiled. If any of the file that a compile depends on changes, a
 recompilation is forced. ``boris`` is able to maintain this dynamic
 dependency list without any user intervention.
 
-== Configuration files ==
+## Configuration files ##
 
 In order to encourage reuse of designs and verification models,
 ``boris`` uses a set of distributed configuration files. By default,
@@ -55,10 +53,10 @@ A typical ``build.cfg`` file for RTL code would simply list the files to be comp
 
 A typical file would look like:
 
-  +define+RTL
-  +incdir+.
-  source_1.v
-  source_2.v
+> +define+RTL  
+> +incdir+.  
+> source1.v  
+> source2.v  
 
 Boris will execute two ``vcom`` commands, one for each source file,
 using the define and include path specified for each compile.
@@ -68,8 +66,8 @@ option will always be relative to the config file that it is in,
 instead of the working directory of the ``boris`` command. This allows
 config files to be written in a more reusable manner.
 
-=== Using config files ===
+### Using config files ###
 
-=== Config file commands ===
+### Config file commands ###
 
 
