@@ -21,7 +21,7 @@ in performance, the overall performance is still very slow.
 The second, and preferred, method to run a simulation is to use the
 "three step process". This can be though of as the
 compile/optimize/simulation methodology. In this method, each file is
-compiled independently using ``vcom``, then all compiled files are
+compiled independently using ``vlog``, then all compiled files are
 optimized (linked) using ``vopt``, and finally the simulation is run
 using ``vsim``. This methodology is much quicker than the single pass,
 qverilog approach. However, it makes it difficult to keep track of
@@ -62,7 +62,7 @@ A typical file would look like:
     source1.v  
     source2.v  
 
-Boris will execute two ``vcom`` commands, one for each source file,
+Boris will execute two ``vlog`` commands, one for each source file,
 using the define and include path specified for each compile.
 
 It should be noted that the include path included in any ``+incdir``
@@ -103,8 +103,8 @@ And the child config file is:
 
 Then two commands will be executed:
 
-    vcom +define+RTL +define+FAST +incdir+. +incdir+../block2 ../block2/block2.v  
-    vcom +define+RTL +incdir+. block1.v  
+    vlog +define+RTL +define+FAST +incdir+. +incdir+../block2 ../block2/block2.v  
+    vlog +define+RTL +incdir+. block1.v  
 
 Notice that the path of the ``+incdir`` and the path to the source
 file in the child config file was changed during execution from paths
@@ -188,13 +188,13 @@ options.
 with which program of the three stage flow. For example, ``-c``, which
 means to not use the graphical interface, will only be sent to
 ``vsim``. ``+define``, which affects compilation, will only be sent to
-``vcom``.
+``vlog``.
 
 But the entire command line option set for Modelsim is vast, and boris
 does not always understand all the options. You can force an option
 using build in extensions.
 
-    @vcom +this_is_sent_to_vcom
+    @vlog +this_is_sent_to_vlog
     @vopt -this_is_sent_to_vopt
     @vsim +this_is_sent_to_vsim
 
