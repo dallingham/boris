@@ -140,10 +140,10 @@ Example:
 
     boris --case=FPGA test1
 
-This will defined the token ``@FPGA`` in the config file. This can be
+This will defined the token ``FPGA`` in the config file. This can be
 tested using the ``@if`` structure.
 
-    @if @FPGA  
+    @if FPGA  
       +define+USE_FPGA  
     @else  
       +define+USE_ASIC  
@@ -159,20 +159,20 @@ directory for each case. This reduces compilation time by eliminated
 the need to recompile when switching cases.
 
 You may also used defines in the config files. These will define
-tokens without the preceding ``@`` symbol. Using the ``--define``
+tokens with a preceding ``@`` symbol. Using the ``--define``
 command line argument, you can change the values of the tokens.
 
 Example:
 
     boris --define=DEBUG test1  
 
-This defines the DEBUG token, and can be checked in the config file.
+This defines the @DEBUG token, and can be checked in the config file.
 
-    @if DEBUG  
+    @if @DEBUG  
        +acc  
     @endif  
 
-In this case, if DEBUG is defined the ``+acc`` option is added. 
+In this case, if @DEBUG is defined the ``+acc`` option is added. 
 
 The major difference between defines and cases is that defines do not
 build in a separate work directory. So if you option affects anything
