@@ -12,10 +12,9 @@ import re
 import os
 import sys
 import optparse
-import copy
 import memoize
 
-DEPS_FILE=".deps-"
+DEPS_FILE = ".deps-"
 VLOG = "vlog -suppress 2286"
 VLIB = "vlib"
 VSIM = "vsim"
@@ -25,17 +24,14 @@ VOPT = "vopt -quiet"
 DEFAULT_CONFIG = "build.cfg"
 FAILBACK_CONFIG = os.path.join("..", "questa", DEFAULT_CONFIG)
 
-vopt_required = 0
-
 #-----------------------------------------------------------------------
 #
 # Regular expressions for parsing the command file
 #
 #-----------------------------------------------------------------------
-file_re    = re.compile("(.*\.(v|vp|sv|vh|svh)$)")
-incdir_re  = re.compile("\+incdir\+(\S+)")
-define_re  = re.compile("(\+define\+\S+)")
-
+FILE_RE    = re.compile("(.*\.(v|vp|sv|vh|svh)$)")
+INCDIR_RE  = re.compile("\+incdir\+(\S+)")
+DEFINE_RE  = re.compile("(\+define\+\S+)")
 
 def find_exe(path, program):
     """
@@ -77,7 +73,8 @@ class BuildParser:
        @endif
 
     """
-    def __init__(self, name, case, deflist=[], inclist=[], vlog_list=[], vopt_list=[], added_vars={}):
+    def __init__(self, name, case, deflist=[], inclist=[], 
+                 vlog_list=[], vopt_list=[], added_vars={}):
         self.case = case
         self.file_list = []
         self.preprocess_active = False
@@ -109,7 +106,6 @@ class BuildParser:
             '-solvefaildebug'       : (self._handle_vsim_cmd, False),
             '-nowarn'               : (self._handle_vlog_cmd, False),
             '+nowarn2286'           : (self._handle_vlog_cmd, False),
-            '+notimingchecks'       : (self._handle_vopt_cmd, False),
             '+acc'                  : (self._handle_vopt_cmd, False),
             '+debugdb'              : (self._handle_vopt_cmd, False),
             '-voptargs=+nosparse'   : (self._handle_vopt_cmd, False),
@@ -190,14 +186,14 @@ class BuildParser:
 
     def _handle_import(self, cmd, text):
         new_file = self._fix_path(text)
-        p = BuildParser(new_file, self.case, self.define_list,
-                        self.include_list, self.vlog_list, self.vopt_list,
-                        self.added_vars)
-        p.read_config_file()
-        self.sub_commands += p.get_command_list()
-        self.case_matches += p.case_matches
-        self.export_vopt_list += p.export_vopt_list
-        self.export_vsim_list += p.export_vsim_list
+        parser = BuildParser(new_file, self.case, self.define_list,
+                             self.include_list, self.vlog_list, self.vopt_list,
+                             self.added_vars)
+        parser.read_config_file()
+        self.sub_commands += parser.get_command_list()
+        self.case_matches += parser.case_matches
+        self.export_vopt_list += parser.export_vopt_list
+        self.export_vsim_list += parser.export_vsim_list
 
     def _handle_setenv(self, cmd, text):
         data = text.split()
@@ -287,13 +283,13 @@ class BuildParser:
                 if not self.enable:
                     continue
 
-                if self._extract_path(self.include_list, incdir_re, line):
+                if self._extract_path(self.include_list, INCDIR_RE, line):
                     continue
                 
-                if self._extract_item(self.define_list, define_re, line):
+                if self._extract_item(self.define_list, DEFINE_RE, line):
                     continue
                 
-                if self._extract_path(self.file_list, file_re, line):
+                if self._extract_path(self.file_list, FILE_RE, line):
                     continue
 
                 if line and line[0] not in ("-", "+"):
@@ -305,14 +301,8 @@ class BuildParser:
                 self.vsim_cmds.append(line)
                 
         except IOError, msg:
-            sys.stderr.write(str(msg) + "\n");
+            sys.stderr.write(str(msg) + "\n")
             sys.exit(1)
-
-    def _build_list(self, cases, item_list):
-        local_list = []
-        for item in cases:
-            local_list.append(item)
-        return local_list
 
     def get_command_list(self):
 
@@ -320,7 +310,12 @@ class BuildParser:
 
         cmd_list = []
         for item in self.file_list:
-            cmd = [VLOG] + ["-work %s" % self.case] + self.vlog_list + self.define_list + include_list + [item]
+            cmd = [VLOG] + \
+                ["-work %s" % self.case] + \
+                self.vlog_list + \
+                self.define_list + \
+                include_list + \
+                [item]
             cmd_list.append((" ".join(cmd), item))
         return self.sub_commands + cmd_list
 
@@ -372,7 +367,7 @@ def parse_command_line():
     return (options, args)
 
 
-def init_if_needed(options, s):
+def init_if_needed(options, script):
     deps_file = DEPS_FILE + options.case
 
     if options.force_rebuild:
@@ -384,10 +379,10 @@ def init_if_needed(options, s):
         if os.path.isfile(deps_file):
             os.unlink(deps_file)
 
-    if s:
-        s.write("if [ ! -f %s ]; then\n" % options.case)
-        s.write("  vlib %s\n" % options.case)
-        s.write("fi\n\n")
+    if script:
+        script.write("if [ ! -f %s ]; then\n" % options.case)
+        script.write("  vlib %s\n" % options.case)
+        script.write("fi\n\n")
 
 def find_config_file(options):
     if not os.path.isfile(options.cfg_file):
@@ -399,13 +394,13 @@ def find_config_file(options):
         cfgfile = options.cfg_file
     return cfgfile
 
-def three_stage_vopt(parser, options, s):
+def three_stage_vopt(parser, options, script):
     full_command = VOPT + " -work %s -o %s_opt " % (options.case, options.case) + \
                    " ".join(parser.vopt_list + parser.modules + parser.export_vopt_list)
 
-    if s:
-        s.write("\necho Optimizing...\n")
-        s.write(full_command + "\n")
+    if script:
+        script.write("\necho Optimizing...\n")
+        script.write(full_command + "\n")
     elif options.dry_run:
         print full_command
     else:
@@ -421,17 +416,21 @@ def three_stage_vopt(parser, options, s):
         if status != 0:
             sys.exit(1)
 
-def three_stage_vsim(parser, options, plusargs, cmdargs, s):
+def three_stage_vsim(parser, options, plusargs, cmdargs, script):
 
     link_cmds_list = parser.vsim_cmds
 
-    sim_cmd = find_exe(os.environ['PATH'], VSIM) + " -lib %s " % options.case +  " ".join(link_cmds_list) + " " + \
-              " ".join(plusargs) + " +UVM_TESTNAME=%s" % cmdargs[0] + " %s_opt" % options.case + " " + \
-              " ".join(parser.export_vsim_list)
+    sim_cmd = find_exe(os.environ['PATH'], VSIM) + \
+        " -lib %s " % options.case + \
+        " ".join(link_cmds_list) + " " + \
+        " ".join(plusargs) + \
+        " +UVM_TESTNAME=%s" % cmdargs[0] + \
+        " %s_opt" % options.case + " " + \
+        " ".join(parser.export_vsim_list)
     
-    if s:
-        s.write("\n\necho Simulating %s...\n" % cmdargs[0])
-        s.write(sim_cmd + "\n")
+    if script:
+        script.write("\n\necho Simulating %s...\n" % cmdargs[0])
+        script.write(sim_cmd + "\n")
     else:
         if options.verbose or options.dry_run:
             print sim_cmd
@@ -447,7 +446,7 @@ def three_stage_vsim(parser, options, plusargs, cmdargs, s):
                 sim_cmd = "%s -N %s -verbose -cwd '%s'" % (QCMD, cmdargs[0], sim_cmd)
             os.system(sim_cmd)
 
-def two_stage_vsim(parser, options, plusargs, cmdargs, s):
+def two_stage_vsim(parser, options, plusargs, cmdargs, script):
 
     link_cmds_list = parser.vsim_cmds + parser.export_vopt_list + parser.export_vsim_list
     sim_cmd = VSIM + " -lib %s " % options.case +  \
@@ -456,9 +455,9 @@ def two_stage_vsim(parser, options, plusargs, cmdargs, s):
               " " + " ".join(parser.vopt_list) + \
               " " + " ".join(parser.modules)
     
-    if s:
-        s.write("\n\necho Simulation %s...\n" % cmdargs[0])
-        s.write(sim_cmd + "\n")
+    if script:
+        script.write("\n\necho Simulation %s...\n" % cmdargs[0])
+        script.write(sim_cmd + "\n")
     else:
         if options.verbose:
             print sim_cmd
@@ -470,13 +469,13 @@ def two_stage_vsim(parser, options, plusargs, cmdargs, s):
                 sim_cmd = "%s -N %s -verbose -cwd '%s'" % (QCMD, cmdargs[0], sim_cmd)
             os.system(sim_cmd)
 
-def run_vlog(full_command, name, options, s):
+def run_vlog(full_command, name, options, script):
     if options.dry_run:
         print full_command
         return 1
-    elif s:
-        s.write("\necho Compiling %s\n" % os.path.basename(name))
-        s.write(full_command)
+    elif script:
+        script.write("\necho Compiling %s\n" % os.path.basename(name))
+        script.write(full_command)
         return 1
     else:
         if options.verbose:
@@ -508,7 +507,7 @@ def run_view(cmdargs, options):
         os.system(cmd)
     
 def main():
-    s = None
+    script = None
     (options, args) = parse_command_line()
 
     plusargs = [ item for item in args if item.lower().startswith("+") ]
@@ -539,12 +538,12 @@ def main():
         sys.exit(1)
 
     if options.script:
-        s = open(options.script, "w")
-        s.write("#! /bin/sh\n")
+        script = open(options.script, "w")
+        script.write("#! /bin/sh\n")
         for key in parser.added_vars.keys():
-            s.write('export %s="%s"\n' % (key, parser.added_vars[key]))
+            script.write('export %s="%s"\n' % (key, parser.added_vars[key]))
 
-    init_if_needed(options, s)
+    init_if_needed(options, script)
     memoize.set_verbose(options.verbose)
 
     # VLOG
@@ -556,7 +555,7 @@ def main():
         parser.vopt_list.append("-G %s" % options.override)
 
     for (full_command, name) in parser.get_command_list():
-        need_vopt |= run_vlog(full_command, name, options, s)
+        need_vopt |= run_vlog(full_command, name, options, script)
 
     if options.seed:
         plusargs.append("-sv_seed")
@@ -564,16 +563,16 @@ def main():
 
     # VOPT/VSIM
     if options.two_stage:
-        two_stage_vsim(parser, options, plusargs, cmdargs, s)
+        two_stage_vsim(parser, options, plusargs, cmdargs, script)
     elif options.view:
         run_view(cmdargs, options)
     else:
         if need_vopt:
-            three_stage_vopt(parser, options, s)
-        three_stage_vsim(parser, options, plusargs, cmdargs, s)
+            three_stage_vopt(parser, options, script)
+        three_stage_vsim(parser, options, plusargs, cmdargs, script)
 
-    if s:
-        s.close()
+    if script:
+        script.close()
 
 if __name__ == "__main__":
     main()
