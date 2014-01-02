@@ -32,7 +32,7 @@ vopt_required = 0
 # Regular expressions for parsing the command file
 #
 #-----------------------------------------------------------------------
-file_re    = re.compile("(.*\.(v|sv|vh|svh)$)")
+file_re    = re.compile("(.*\.(v|vp|sv|vh|svh)$)")
 incdir_re  = re.compile("\+incdir\+(\S+)")
 define_re  = re.compile("(\+define\+\S+)")
 
